@@ -24,8 +24,12 @@ def make_embed(release: dict, is_new: bool) -> discord.Embed:
     embed.add_field(name="Type", value=release["type"].capitalize(), inline=True)
     if release.get("date"):
         embed.add_field(name="Published", value=release["date"], inline=True)
-    embed.add_field(name="APKMirror Page", value=f"[View on APKMirror]({release['url']})", inline=False)
-    embed.set_footer(text="Roblox Version Tracker • apkmirror.com")
+    embed.add_field(
+        name="Links",
+        value=f"[APKMirror Release Page]({release['url']}) • [APKMirror Listing]({release.get('apkmirror_listing', 'https://www.apkmirror.com/apk/roblox-corporation/roblox/')})",
+        inline=False,
+    )
+    embed.set_footer(text="Roblox Version Tracker • sourced from Google Play")
     return embed
 
 
