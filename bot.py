@@ -1,14 +1,14 @@
 import os
 import asyncio
 import discord
-from discord.ext import commands, tasks
+from discord import app_commands
+from discord.ext import tasks
 from datetime import datetime
 
 import scraper
 import version_store
 
 DISCORD_TOKEN = os.environ.get("DISCORD_TOKEN")
-DEFAULT_CHECK_INTERVAL = 300  # 5 minutes
 
 
 def make_embed(release: dict, is_new: bool) -> discord.Embed:
@@ -26,19 +26,19 @@ def make_embed(release: dict, is_new: bool) -> discord.Embed:
         embed.add_field(name="Published", value=release["date"], inline=True)
     embed.add_field(name="APKMirror Page", value=f"[View on APKMirror]({release['url']})", inline=False)
     embed.set_footer(text="Roblox Version Tracker • apkmirror.com")
-    embed.set_thumbnail(url="https://www.apkmirror.com/wp-content/themes/APKMirror/favicon.ico")
     return embed
 
 
-class RobloxTracker(commands.Bot):
+class RobloxTracker(discord.Client):
     def __init__(self):
         intents = discord.Intents.default()
-        intents.message_content = True
-        super().__init__(command_prefix="!", intents=intents)
+        super().__init__(intents=intents)
+        self.tree = app_commands.CommandTree(self)
 
     async def setup_hook(self):
+        await self.tree.sync()
         self.check_roblox_version.start()
-        print("[Bot] Background version checker started.")
+        print("[Bot] Slash commands synced. Background version checker started.")
 
     async def on_ready(self):
         print(f"[Bot] Logged in as {self.user} ({self.user.id})")
@@ -49,10 +49,13 @@ class RobloxTracker(commands.Bot):
             )
         )
 
-    @tasks.loop(seconds=1)
+    @tasks.loop(seconds=60)
     async def check_roblox_version(self):
         interval = version_store.get_check_interval()
-        await asyncio.sleep(interval)
+        # Only check on multiples of 60s matching the interval
+        elapsed = self.check_roblox_version.current_loop * 60
+        if elapsed % interval != 0 or elapsed == 0:
+            return
 
         channel_id = version_store.get_tracked_channel()
         if not channel_id:
@@ -82,88 +85,79 @@ class RobloxTracker(commands.Bot):
     @check_roblox_version.before_loop
     async def before_check(self):
         await self.wait_until_ready()
+        # Skip the very first tick (elapsed=0 check above handles this)
+        await asyncio.sleep(60)
 
 
-bot = RobloxTracker()
+client = RobloxTracker()
 
 
-@bot.command(name="setchannel")
-@commands.has_permissions(manage_channels=True)
-async def set_channel(ctx, channel: discord.TextChannel = None):
-    """Set the channel where version updates will be posted."""
-    target = channel or ctx.channel
+@client.tree.command(name="setchannel", description="Set the channel where Roblox version updates will be posted.")
+@app_commands.describe(channel="The channel to post updates in (defaults to current channel)")
+@app_commands.default_permissions(manage_channels=True)
+async def setchannel(interaction: discord.Interaction, channel: discord.TextChannel = None):
+    target = channel or interaction.channel
     version_store.set_tracked_channel(target.id)
-    await ctx.reply(f"Version update announcements will be sent to {target.mention}.")
+    await interaction.response.send_message(f"Version update announcements will be sent to {target.mention}.")
 
 
-@bot.command(name="checkversion")
-async def check_version(ctx):
-    """Manually check the current Roblox Android version."""
-    async with ctx.typing():
-        release = await asyncio.to_thread(scraper.fetch_latest_release)
+@client.tree.command(name="checkversion", description="Manually check the current Roblox Android version on APKMirror.")
+async def checkversion(interaction: discord.Interaction):
+    await interaction.response.defer()
+    release = await asyncio.to_thread(scraper.fetch_latest_release)
     if not release:
-        await ctx.reply("Could not fetch version info from APKMirror. Try again later.")
+        await interaction.followup.send("Could not fetch version info from APKMirror. Try again later.")
         return
     embed = make_embed(release, is_new=False)
-    await ctx.reply(embed=embed)
+    await interaction.followup.send(embed=embed)
 
 
-@bot.command(name="setinterval")
-@commands.has_permissions(manage_guild=True)
-async def set_interval(ctx, seconds: int):
-    """Set how often (in seconds) the bot checks for updates. Minimum 60s."""
+@client.tree.command(name="setinterval", description="Set how often (in seconds) the bot checks for updates.")
+@app_commands.describe(seconds="Check interval in seconds (minimum 60, default 300)")
+@app_commands.default_permissions(manage_guild=True)
+async def setinterval(interaction: discord.Interaction, seconds: int):
     if seconds < 60:
-        await ctx.reply("Minimum check interval is 60 seconds.")
+        await interaction.response.send_message("Minimum check interval is 60 seconds.", ephemeral=True)
         return
     version_store.set_check_interval(seconds)
     mins = seconds // 60
-    await ctx.reply(f"Check interval updated to {seconds}s ({mins} min).")
+    await interaction.response.send_message(f"Check interval updated to {seconds}s ({mins} min).")
 
 
-@bot.command(name="status")
-async def status(ctx):
-    """Show current tracker status."""
+@client.tree.command(name="status", description="Show current tracker status.")
+async def status(interaction: discord.Interaction):
     channel_id = version_store.get_tracked_channel()
     known_version = version_store.get_known_version()
     interval = version_store.get_check_interval()
 
-    channel_mention = f"<#{channel_id}>" if channel_id else "Not set"
+    channel_mention = f"<#{channel_id}>" if channel_id else "Not set — use /setchannel"
     version_str = known_version if known_version else "Not checked yet"
 
     embed = discord.Embed(title="Roblox Version Tracker Status", color=discord.Color.blurple())
     embed.add_field(name="Announcement Channel", value=channel_mention, inline=False)
     embed.add_field(name="Last Known Version", value=f"`{version_str}`", inline=True)
     embed.add_field(name="Check Interval", value=f"{interval}s ({interval // 60}m)", inline=True)
-    await ctx.reply(embed=embed)
+    embed.set_footer(text="Source: apkmirror.com/apk/roblox-corporation/roblox/")
+    await interaction.response.send_message(embed=embed)
 
 
-@bot.command(name="help_tracker")
-async def help_tracker(ctx):
-    """Show all available commands."""
+@client.tree.command(name="help", description="Show all available tracker commands.")
+async def help_cmd(interaction: discord.Interaction):
     embed = discord.Embed(
         title="Roblox Version Tracker — Commands",
         color=discord.Color.blurple(),
-        description="Tracks Roblox Android releases from APKMirror."
+        description="Tracks Roblox Android releases from APKMirror and announces new versions."
     )
-    embed.add_field(name="!setchannel [#channel]", value="Set the channel for update announcements. Defaults to current channel.", inline=False)
-    embed.add_field(name="!checkversion", value="Manually fetch and display the latest Roblox Android version.", inline=False)
-    embed.add_field(name="!setinterval <seconds>", value="Change how often the bot checks for updates (min 60s, default 300s).", inline=False)
-    embed.add_field(name="!status", value="Show tracker status (channel, last version, interval).", inline=False)
+    embed.add_field(name="/setchannel [channel]", value="Set the channel for update announcements.", inline=False)
+    embed.add_field(name="/checkversion", value="Manually fetch and display the latest Roblox Android version.", inline=False)
+    embed.add_field(name="/setinterval <seconds>", value="Change how often the bot checks for updates (min 60s, default 300s).", inline=False)
+    embed.add_field(name="/status", value="Show tracker status: channel, last version, check interval.", inline=False)
     embed.set_footer(text="Source: apkmirror.com/apk/roblox-corporation/roblox/")
-    await ctx.reply(embed=embed)
-
-
-@set_channel.error
-@set_interval.error
-async def permission_error(ctx, error):
-    if isinstance(error, commands.MissingPermissions):
-        await ctx.reply("You don't have permission to use that command.")
-    elif isinstance(error, commands.BadArgument):
-        await ctx.reply("Invalid argument. Please check the command usage with `!help_tracker`.")
+    await interaction.response.send_message(embed=embed)
 
 
 if __name__ == "__main__":
     if not DISCORD_TOKEN:
         print("[Error] DISCORD_TOKEN environment variable is not set.")
         exit(1)
-    bot.run(DISCORD_TOKEN)
+    client.run(DISCORD_TOKEN)
