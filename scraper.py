@@ -1,7 +1,13 @@
 import requests
 import re
 
-GOOGLE_PLAY_URL = "https://play.google.com/store/apps/details?id=com.roblox.client&hl=en"
+# Check multiple regions — some roll out updates earlier than others
+GOOGLE_PLAY_REGIONS = [
+    "https://play.google.com/store/apps/details?id=com.roblox.client&hl=en&gl=GB",
+    "https://play.google.com/store/apps/details?id=com.roblox.client&hl=en&gl=US",
+    "https://play.google.com/store/apps/details?id=com.roblox.client&hl=en&gl=CA",
+]
+
 APKMIRROR_BASE = "https://www.apkmirror.com/apk/roblox-corporation/roblox/"
 
 HEADERS = {
@@ -22,36 +28,33 @@ def _version_tuple(v: str):
 
 
 def _apkmirror_link(version: str) -> str:
-    """
-    Build a best-guess APKMirror link for a given version.
-    e.g. 2.718.1110 -> /apk/roblox-corporation/roblox/roblox-2-718-1110-release/
-    """
     slug = version.replace(".", "-")
     return f"{APKMIRROR_BASE}roblox-{slug}-release/"
 
 
 def fetch_latest_release() -> dict | None:
     """
-    Fetches the latest Roblox Android version from Google Play Store.
+    Fetches the latest Roblox Android version by checking Google Play across
+    multiple regions and taking the highest version number found.
     Returns a dict with version info or None on failure.
     """
-    try:
-        response = requests.get(GOOGLE_PLAY_URL, headers=HEADERS, timeout=20)
-        response.raise_for_status()
-    except requests.RequestException as e:
-        print(f"[Scraper] Request failed: {e}")
+    all_versions = []
+
+    for url in GOOGLE_PLAY_REGIONS:
+        try:
+            response = requests.get(url, headers=HEADERS, timeout=15)
+            response.raise_for_status()
+            matches = re.findall(r"\b(2\.\d{3,4}\.\d{3,4})\b", response.text)
+            all_versions.extend(matches)
+        except requests.RequestException as e:
+            print(f"[Scraper] Failed for {url}: {e}")
+            continue
+
+    if not all_versions:
+        print("[Scraper] No version numbers found across all regions.")
         return None
 
-    text = response.text
-
-    # Roblox uses a 2.NNN.NNN versioning scheme on Android
-    versions = re.findall(r"\b(2\.\d{3,4}\.\d{3,4})\b", text)
-    if not versions:
-        print("[Scraper] No version numbers found in page.")
-        return None
-
-    unique = list(set(versions))
-    latest = max(unique, key=_version_tuple)
+    latest = max(set(all_versions), key=_version_tuple)
 
     return {
         "version": latest,
